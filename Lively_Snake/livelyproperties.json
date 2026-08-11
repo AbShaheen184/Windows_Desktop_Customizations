@@ -4,6 +4,14 @@
     "value": "BG/",
     "text": "Background folder (relative to HTML file)"
   },
+    "SNAKE_SPEED": {
+    "type": "slider",
+    "text": "Snake Walk Speed",
+    "min": 0.5,
+    "max": 10.0,
+    "step": 0.1,
+    "value": 2.5
+  },
   "CHANGE_INTERVAL_MS": {
     "type": "slider",
     "value": 6000,
