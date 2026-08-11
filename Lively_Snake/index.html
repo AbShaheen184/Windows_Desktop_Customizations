@@ -69,8 +69,9 @@ canvas  { display: block; position: relative; z-index: 3; }
   let totalImages = 0;
   let currentImgNum = 1;
   const DEFAULT_COLOR = { h: 36, s: 35, l: 30 };
-  let snakeColor  = { ...DEFAULT_COLOR };
+  let oldColor    = { ...DEFAULT_COLOR };
   let targetColor = { ...DEFAULT_COLOR };
+  let snakeColor  = { ...DEFAULT_COLOR };
   let globalTime = 0, globalTimeMs = 0;
   let target = { x: 0, y: 0 }, prevHead = { x: 0, y: 0 };
   let dvdVel = { x: 2.2, y: 1.8 }; // DVD movement vector
@@ -103,10 +104,37 @@ canvas  { display: block; position: relative; z-index: 3; }
     return Math.sqrt(dx * dx + dy * dy);
   }
   function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function lerpAngle(a, b, t) {
+    let diff = (b - a) % 360;
+    if (diff < -180) diff += 360;
+    if (diff > 180) diff -= 360;
+    return (a + diff * t + 360) % 360;
+  }
   function sanitizeFolder(v) {
     let s = String(v || 'BG/');
     if (!s.endsWith('/')) s += '/';
     return s;
+  }
+
+  // Calculate dynamic color for each node so color transforms WITH the bulge wave
+  function getNodeColor(i, totalNodes) {
+    const totalWaveMs = +liveConfig.TENTACLE_WAVE_DURATION || 3000;
+    const elapsed = globalTimeMs - waveStartTime;
+    if (elapsed < 0) return { ...oldColor };
+    if (elapsed >= totalWaveMs) return { ...targetColor };
+
+    const progress = elapsed / totalWaveMs;
+    const bulgeWidth = 4.5;
+    const centerPos = -bulgeWidth + progress * (totalNodes + 2 * bulgeWidth);
+
+    // k goes from 0 (old color ahead of bulge) to 1 (new color behind bulge)
+    const k = clamp((centerPos - (i - bulgeWidth)) / (2 * bulgeWidth), 0, 1);
+
+    return {
+      h: lerpAngle(oldColor.h, targetColor.h, k),
+      s: oldColor.s + (targetColor.s - oldColor.s) * k,
+      l: oldColor.l + (targetColor.l - oldColor.l) * k
+    };
   }
 
   // ── BACKGROUND SYSTEM ────────────────────────────────────────
@@ -128,6 +156,9 @@ canvas  { display: block; position: relative; z-index: 3; }
           s: isNaN(hsl.s) ? DEFAULT_COLOR.s : clamp(hsl.s + 15, 30, 65),
           l: isNaN(hsl.l) ? DEFAULT_COLOR.l : clamp(hsl.l, 22, 42)
         };
+
+        // Capture current head/front color before assigning new target
+        oldColor = getNodeColor(0, spine ? spine.length : 40);
         targetColor = newColor;
 
         // Trigger continuous wave along body
@@ -328,7 +359,7 @@ canvas  { display: block; position: relative; z-index: 3; }
         const t = clamp(elapsed / this.colorDuration, 0, 1);
         const ease = 1 - Math.pow(1 - t, 3);
         const k = clamp(ease * (+liveConfig.TENTACLE_COLOR_SPEED || 0.045) * 4, 0, 0.5);
-        this.color.h += (this.colorTarget.h - this.color.h) * k;
+        this.color.h = lerpAngle(this.color.h, this.colorTarget.h, k);
         this.color.s += (this.colorTarget.s - this.color.s) * k;
         this.color.l += (this.colorTarget.l - this.color.l) * k;
       }
@@ -424,12 +455,10 @@ canvas  { display: block; position: relative; z-index: 3; }
   function update() {
     globalTime++;
     breathe += 0.022;
-    if (isNaN(snakeColor.h))  snakeColor  = { ...DEFAULT_COLOR };
-    if (isNaN(targetColor.h)) targetColor = { ...DEFAULT_COLOR };
-    const bodySpeed = +liveConfig.BODY_COLOR_SPEED || 0.025;
-    snakeColor.h += (targetColor.h - snakeColor.h) * bodySpeed;
-    snakeColor.s += (targetColor.s - snakeColor.s) * bodySpeed;
-    snakeColor.l += (targetColor.l - snakeColor.l) * bodySpeed;
+
+    // Update head color for accessory parts (head, eyes, tongue)
+    snakeColor = getNodeColor(0, spine.length);
+
     blinkT++;
     if (blinkT >= nextBlink) {
       if (!blinkClosing) {
@@ -577,11 +606,12 @@ canvas  { display: block; position: relative; z-index: 3; }
   function drawScaledBody() {
     const n = spine.length;
 
-    // First layer: base body circles expanding continuously
+    // First layer: base body circles expanding continuously with exact per-node color wave
     for (let i = n - 1; i >= 0; i--) {
       const frac = 1 - i / n;
       let r = bodyRadius(i, frac);
       const pulse = getSpinePulse(i, n);
+      const col = getNodeColor(i, n);
 
       // Smooth lump bulge expansion (up to 75% wider peak)
       r *= (1 + pulse * 0.75);
@@ -592,10 +622,10 @@ canvas  { display: block; position: relative; z-index: 3; }
       c.arc(spine[i].x, spine[i].y, r, 0, Math.PI * 2);
 
       // Smooth color glow pulse along the lump
-      const s = clamp(snakeColor.s + pulse * 35, 0, 100);
-      const l = clamp(snakeColor.l + 18 + pulse * 30, 0, 100);
+      const s = clamp(col.s + pulse * 35, 0, 100);
+      const l = clamp(col.l + 18 + pulse * 30, 0, 100);
 
-      c.fillStyle = `hsl(${snakeColor.h + 8}, ${s}%, ${l}%)`;
+      c.fillStyle = `hsl(${col.h + 8}, ${s}%, ${l}%)`;
       c.fill();
     }
 
@@ -604,6 +634,7 @@ canvas  { display: block; position: relative; z-index: 3; }
       const frac = 1 - i / n;
       let r = bodyRadius(i, frac);
       const pulse = getSpinePulse(i, n);
+      const col = getNodeColor(i, n);
 
       r *= (1 + pulse * 0.75);
       if (r < 1) continue;
@@ -618,12 +649,12 @@ canvas  { display: block; position: relative; z-index: 3; }
       c.closePath();
 
       const baseL = isDark
-        ? Math.max(8, snakeColor.l - 15)
-        : snakeColor.l - 5;
+        ? Math.max(8, col.l - 15)
+        : col.l - 5;
 
       c.fillStyle = isDark
-        ? `hsl(${snakeColor.h}, ${snakeColor.s + 10}%, ${baseL + pulse * 20}%)`
-        : `hsl(${snakeColor.h + 2}, ${snakeColor.s}%, ${baseL + pulse * 25}%)`;
+        ? `hsl(${col.h}, ${col.s + 10}%, ${baseL + pulse * 20}%)`
+        : `hsl(${col.h + 2}, ${col.s}%, ${baseL + pulse * 25}%)`;
       c.fill();
 
       const latW = Math.PI * 0.18;
@@ -634,7 +665,7 @@ canvas  { display: block; position: relative; z-index: 3; }
         c.moveTo(spine[i].x, spine[i].y);
         c.arc(spine[i].x, spine[i].y, r, Math.min(s1, s2), Math.max(s1, s2));
         c.closePath();
-        c.fillStyle = `hsl(${snakeColor.h + 5}, ${snakeColor.s - 5}%, ${snakeColor.l + 5 + pulse * 18}%)`;
+        c.fillStyle = `hsl(${col.h + 5}, ${col.s - 5}%, ${col.l + 5 + pulse * 18}%)`;
         c.fill();
       }
 
@@ -654,6 +685,8 @@ canvas  { display: block; position: relative; z-index: 3; }
     const ang = Math.atan2(tail.y - prev.y, tail.x - prev.x);
     const shakeAmp = Math.min(speed * 0.6, 0.35);
     const shake = Math.sin(globalTime * 0.45) * shakeAmp;
+    const tailCol = getNodeColor(spine.length - 1, spine.length);
+
     c.save();
     c.translate(tail.x, tail.y);
     c.rotate(ang + shake);
@@ -664,8 +697,8 @@ canvas  { display: block; position: relative; z-index: 3; }
       c.beginPath();
       c.ellipse(rx + segW * 0.5, 0, segW, segH, 0, 0, Math.PI * 2);
       c.fillStyle = isLight
-        ? `hsl(${snakeColor.h}, ${snakeColor.s}%, ${snakeColor.l}%)`
-        : `hsl(${snakeColor.h}, ${snakeColor.s}%, ${Math.max(10, snakeColor.l - 12)}%)`;
+        ? `hsl(${tailCol.h}, ${tailCol.s}%, ${tailCol.l}%)`
+        : `hsl(${tailCol.h}, ${tailCol.s}%, ${Math.max(10, tailCol.l - 12)}%)`;
       c.fill();
       c.strokeStyle = 'rgba(0,0,0,0.35)';
       c.lineWidth = 0.6;
