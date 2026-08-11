@@ -56,6 +56,7 @@ canvas  { display: block; position: relative; z-index: 3; }
     MAX_TENTACLES          : 35,
     SPINE_SEG_DIST         : 14,
     RATTLE_COUNT           : 8,
+    SNAKE_SPEED            : 2,  // Speed multiplier for DVD/idle movement
     TENTACLE_COLOR_SPEED   : 0.045,
     TENTACLE_WAVE_DURATION : 3000,
     BODY_COLOR_SPEED       : 0.025,
@@ -74,7 +75,7 @@ canvas  { display: block; position: relative; z-index: 3; }
   let snakeColor  = { ...DEFAULT_COLOR };
   let globalTime = 0, globalTimeMs = 0;
   let target = { x: 0, y: 0 }, prevHead = { x: 0, y: 0 };
-  let dvdVel = { x: 2.2, y: 1.8 }; // DVD movement vector
+  let dvdVel = { x: 2.2, y: 1.8 }; // Direction vector
   let speed = 0, breathe = 0;
   let blinkT = 0, blinkAmt = 0, blinkClosing = false, nextBlink = 220;
   let tongueFlicker = 0;
@@ -478,6 +479,12 @@ canvas  { display: block; position: relative; z-index: 3; }
       target.x += (mx - target.x) * (+liveConfig.MOUSE_FOLLOW_SPEED || 0.1);
       target.y += (my - target.y) * (+liveConfig.MOUSE_FOLLOW_SPEED || 0.1);
     } else {
+      // Keep velocity magnitude synchronized with SNAKE_SPEED
+      const moveSpeed = +liveConfig.SNAKE_SPEED || 2.5;
+      const curMag = Math.hypot(dvdVel.x, dvdVel.y) || 1;
+      dvdVel.x = (dvdVel.x / curMag) * moveSpeed;
+      dvdVel.y = (dvdVel.y / curMag) * moveSpeed;
+
       // DVD Bouncing + Random Path Wandering Logic
       target.x += dvdVel.x;
       target.y += dvdVel.y;
@@ -515,10 +522,9 @@ canvas  { display: block; position: relative; z-index: 3; }
       // Randomly change path direction while wandering on screen
       if (!bounced && Math.random() < 0.008) {
         let angle = Math.atan2(dvdVel.y, dvdVel.x);
-        const speedMag = Math.hypot(dvdVel.x, dvdVel.y) || 2.5;
         angle += (Math.random() - 0.5) * (Math.PI * 0.7); // Shift trajectory randomly
-        dvdVel.x = Math.cos(angle) * speedMag;
-        dvdVel.y = Math.sin(angle) * speedMag;
+        dvdVel.x = Math.cos(angle) * moveSpeed;
+        dvdVel.y = Math.sin(angle) * moveSpeed;
       }
     }
 
@@ -864,6 +870,7 @@ canvas  { display: block; position: relative; z-index: 3; }
       f1.add(liveConfig, 'FADE_MS', 200, 10000, 100).name('Fade (ms)').onFinishChange(v => applyConfigChanges({ FADE_MS: v }));
       f1.add(liveConfig, 'SHUFFLE_BACKGROUNDS', 0, 1, 1).name('Shuffle');
       const f2 = gui.addFolder('Snake');
+      f2.add(liveConfig, 'SNAKE_SPEED', 0.5, 10, 0.1).name('Walk Speed');
       f2.add(liveConfig, 'MAX_TENTACLES', 8, 80, 1).name('Tentacles').onFinishChange(v => applyConfigChanges({ MAX_TENTACLES: v }));
       f2.add(liveConfig, 'SPINE_SEG_DIST', 6, 30, 1).name('Spine');
       f2.add(liveConfig, 'RATTLE_COUNT', 3, 20, 1).name('Rattle');
