@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Monster Snake</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+body, html { 
+  background-color: rgb(12, 10, 8);
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-attachment: fixed;
+  background-size: cover;
+  overflow: hidden; 
+  width: 100vw; 
+  height: 100vh; 
+  position: relative;
+}
+#bg-old, #bg-new {
+  position: fixed;
+  inset: 0;
+  background-color: rgb(12, 10, 8);
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-attachment: fixed;
+  background-size: cover;
+  pointer-events: none;
+}
+#bg-old { z-index: 1; opacity: 1; transition: opacity 1.2s ease-in-out; }
+#bg-new { z-index: 2; opacity: 0; transition: opacity 1.2s ease-in-out; }
+canvas  { display: block; position: relative; z-index: 3; }
+.dg { opacity: 0.9; z-index: 9999; }
+@media (prefers-reduced-motion: reduce) {
+  #bg-old, #bg-new { transition-duration: 0.01ms; }
+}
+</style>
+</head>
+<body>
+<div id="bg-old"></div>
+<div id="bg-new"></div>
+<canvas id="canvas"></canvas>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── LIVE CONFIG (mutable, reactive) ──────────────────────────
+  const liveConfig = {
+    BG_FOLDER              : 'BG/',
+    CHANGE_INTERVAL_MS     : 6000,
+    FADE_MS                : 2400,
+    MAX_TENTACLES          : 35,
+    SPINE_SEG_DIST         : 14,
+    RATTLE_COUNT           : 8,
+    TENTACLE_COLOR_SPEED   : 0.045,
+    TENTACLE_WAVE_DURATION : 3000,
+    BODY_COLOR_SPEED       : 0.025,
+    MOUSE_FOLLOW_SPEED     : 0.1,
+    MOUSE_MARGIN           : 60,
+    MOUSE_IDLE_MS          : 1500,
+    SHUFFLE_BACKGROUNDS    : 0,
+  };
+
+  // ── STATE ────────────────────────────────────────────────────
+  let totalImages = 0;
+  let currentImgNum = 1;
+  const DEFAULT_COLOR = { h: 36, s: 35, l: 30 };
+  let snakeColor  = { ...DEFAULT_COLOR };
+  let targetColor = { ...DEFAULT_COLOR };
+  let globalTime = 0, globalTimeMs = 0;
+  let target = { x: 0, y: 0 }, prevHead = { x: 0, y: 0 };
+  let dvdVel = { x: 2.2, y: 1.8 }; // DVD movement vector
+  let speed = 0, breathe = 0;
+  let blinkT = 0, blinkAmt = 0, blinkClosing = false, nextBlink = 220;
+  let tongueFlicker = 0;
+  let bgTimer = null;
+  let waveStartTime = -Infinity; // Global wave timer for body swallowing effect
+
+  // ── UTIL ─────────────────────────────────────────────────────
+  function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0;
+    const l = (max + min) / 2;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      switch (max) {
+        case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+        case g: h = (b - r) / d + 2; break;
+        case b: h = (r - g) / d + 4; break;
+      }
+      h /= 6;
+    }
+    return { h: Math.round(h * 360), s: Math.round(s * 100), l: Math.round(l * 100) };
+  }
+  function getDist(ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  function sanitizeFolder(v) {
+    let s = String(v || 'BG/');
+    if (!s.endsWith('/')) s += '/';
+    return s;
+  }
+
+  // ── BACKGROUND SYSTEM ────────────────────────────────────────
+  function applyBackground(path, startTime) {
+    const img = new Image();
+    img.onload = function () {
+      try {
+        const tmp = document.createElement('canvas');
+        const tctx = tmp.getContext('2d', { willReadFrequently: true });
+        tmp.width = 16; tmp.height = 16;
+        tctx.drawImage(img, 0, 0, 16, 16);
+        const d = tctx.getImageData(0, 0, 16, 16).data;
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i+1]; b += d[i+2]; n++; }
+        r = r / n | 0; g = g / n | 0; b = b / n | 0;
+        const hsl = rgbToHsl(r, g, b);
+        const newColor = {
+          h: isNaN(hsl.h) ? DEFAULT_COLOR.h : hsl.h,
+          s: isNaN(hsl.s) ? DEFAULT_COLOR.s : clamp(hsl.s + 15, 30, 65),
+          l: isNaN(hsl.l) ? DEFAULT_COLOR.l : clamp(hsl.l, 22, 42)
+        };
+        targetColor = newColor;
+
+        // Trigger continuous wave along body
+        waveStartTime = startTime;
+
+        if (leftLegs) for (let t of leftLegs)  t.startColorTransition(newColor, startTime);
+        if (rightLegs) for (let t of rightLegs) t.startColorTransition(newColor, startTime);
+      } catch (_) { targetColor = { ...DEFAULT_COLOR }; }
+    };
+    img.onerror = () => { targetColor = { ...DEFAULT_COLOR }; };
+    img.src = path;
+  }
+
+  function changeBackground() {
+    if (totalImages === 0) return;
+    const folder = sanitizeFolder(liveConfig.BG_FOLDER);
+    const path = `${folder}${currentImgNum}.jpg`;
+    const startTime = performance.now();
+    applyBackground(path, startTime);
+
+    const fadeMs = +liveConfig.FADE_MS || 2400;
+    const oldLayer = document.getElementById('bg-old');
+    const newLayer = document.getElementById('bg-new');
+
+    newLayer.style.transition = 'none';
+    newLayer.style.backgroundImage = `url("${path}")`;
+    newLayer.style.opacity = '0';
+    void newLayer.offsetWidth;
+    newLayer.style.transition = `opacity ${fadeMs}ms ease-in-out`;
+
+    if (!oldLayer.style.backgroundImage) {
+      oldLayer.style.backgroundImage = document.body.style.backgroundImage;
+    }
+    oldLayer.style.transition = `opacity ${fadeMs}ms ease-in-out`;
+    oldLayer.style.opacity = '0';
+
+    setTimeout(() => {
+      oldLayer.style.transition = 'none';
+      oldLayer.style.backgroundImage = newLayer.style.backgroundImage;
+      oldLayer.style.opacity = '1';
+      void oldLayer.offsetWidth;
+      document.body.style.backgroundImage = newLayer.style.backgroundImage;
+    }, fadeMs);
+
+    newLayer.style.opacity = '1';
+
+    const shuffle = +liveConfig.SHUFFLE_BACKGROUNDS >= 1;
+    if (shuffle && totalImages > 1) {
+      let next;
+      do { next = 1 + Math.floor(Math.random() * totalImages); }
+      while (next === currentImgNum && totalImages > 1);
+      currentImgNum = next;
+    } else {
+      currentImgNum = (currentImgNum % totalImages) + 1;
+    }
+  }
+
+  function detectTotalImages(onDone) {
+    const folder = sanitizeFolder(liveConfig.BG_FOLDER);
+    let count = 0;
+    function probe() {
+      const test = new Image();
+      test.onload = () => { count++; probe(); };
+      test.onerror = () => onDone(Math.max(1, count));
+      test.src = `${folder}${count + 1}.jpg`;
+    }
+    probe();
+  }
+
+  function startBgRotation() {
+    if (bgTimer) clearInterval(bgTimer);
+    const interval = +liveConfig.CHANGE_INTERVAL_MS || 6000;
+    bgTimer = setInterval(() => {
+      if (!document.hidden) changeBackground();
+    }, interval);
+  }
+
+  // ── CANVAS / DPR ─────────────────────────────────────────────
+  const canvas = document.getElementById('canvas');
+  const c = canvas.getContext('2d', { alpha: true });
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  let w = 0, h = 0;
+  function resize() {
+    w = window.innerWidth;
+    h = window.innerHeight;
+    canvas.width  = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    canvas.style.width  = w + 'px';
+    canvas.style.height = h + 'px';
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    initDots();
+  }
+
+  // ── MOUSE ────────────────────────────────────────────────────
+  const mouse = { x: 0, y: 0, active: false };
+  let mouseLastMove = -Infinity;
+  canvas.addEventListener('mousemove', e => {
+    mouse.x = e.clientX; mouse.y = e.clientY;
+    mouse.active = true;
+    mouseLastMove = performance.now();
+  });
+  canvas.addEventListener('mouseleave', () => { mouse.active = false; });
+  window.addEventListener('mousemove', e => {
+    mouse.x = e.clientX; mouse.y = e.clientY;
+    mouse.active = true;
+    mouseLastMove = performance.now();
+  });
+
+  // ── DOTS ─────────────────────────────────────────────────────
+  let dots = [];
+  const grid = new Map();
+  const CELL = 50;
+  const cellKey = (cx, cy) => (cx << 16) ^ (cy & 0xffff);
+  function initDots() {
+    dots = []; grid.clear();
+    const sp = 32;
+    for (let x = -sp; x < w + sp; x += sp) {
+      for (let y = -sp; y < h + sp; y += sp) {
+        const dot = {
+          x: x + Math.random() * sp,
+          y: y + Math.random() * sp,
+          ox: 0, oy: 0,
+          size: Math.random() * 1.8 + 0.3,
+          usedBy: null
+        };
+        dots.push(dot);
+        const k = cellKey(Math.floor(dot.x / CELL), Math.floor(dot.y / CELL));
+        let arr = grid.get(k);
+        if (!arr) { arr = []; grid.set(k, arr); }
+        arr.push(dot);
+      }
+    }
+  }
+
+  // ── SEG / TENT ───────────────────────────────────────────────
+  class Seg {
+    constructor(parent, l, a, first) {
+      this.l = l; this.ang = a;
+      this.pos = first ? { x: parent.x, y: parent.y } : { x: parent.nextPos.x, y: parent.nextPos.y };
+      this.nextPos = { x: this.pos.x + l * Math.cos(a), y: this.pos.y + l * Math.sin(a) };
+    }
+    update(t, curL) {
+      this.l = curL;
+      this.ang = Math.atan2(t.y - this.pos.y, t.x - this.pos.x);
+      this.pos.x = t.x + this.l * Math.cos(this.ang - Math.PI);
+      this.pos.y = t.y + this.l * Math.sin(this.ang - Math.PI);
+      this.nextPos.x = this.pos.x + this.l * Math.cos(this.ang);
+      this.nextPos.y = this.pos.y + this.l * Math.sin(this.ang);
+    }
+    fallback(t) {
+      this.pos.x = t.x; this.pos.y = t.y;
+      this.nextPos.x = this.pos.x + this.l * Math.cos(this.ang);
+      this.nextPos.y = this.pos.y + this.l * Math.sin(this.ang);
+    }
+  }
+
+  class Tent {
+    constructor(x, y, l, n, side, index) {
+      this.x = x; this.y = y; this.maxL = l; this.n = n;
+      this.side = side; this.index = index;
+      this.rand = Math.random();
+      this.phase = Math.random() * Math.PI * 2;
+      this.liftT = 0;
+      this.targetDot = null;
+      this.smoothTarget = { x, y };
+      this.color = { ...DEFAULT_COLOR };
+      this.colorTarget = { ...DEFAULT_COLOR };
+      this.colorStartTime = -Infinity;
+      this.colorDuration = (+liveConfig.TENTACLE_WAVE_DURATION || 3000) * 0.7;
+      this.segments = [new Seg(this, l / n, 0, true)];
+      for (let i = 1; i < n; i++) this.segments.push(new Seg(this.segments[i - 1], l / n, 0, false));
+    }
+    startColorTransition(newColor, baseTime) {
+      this.colorTarget = { ...newColor };
+      this.colorStartTime = baseTime + (this.index / (+liveConfig.MAX_TENTACLES || 35)) * (+liveConfig.TENTACLE_WAVE_DURATION || 3000);
+    }
+    release() { if (this.targetDot) { this.targetDot.usedBy = null; this.targetDot = null; } }
+    move(tx, ty, bodyAngle) {
+      this.x = tx; this.y = ty;
+      if (this.targetDot && getDist(this.x, this.y, this.targetDot.x, this.targetDot.y) > this.maxL * 1.35) {
+        this.release();
+      }
+      if (!this.targetDot) this.targetDot = this.findNearestDot(bodyAngle);
+      let fx, fy;
+      if (this.targetDot) { fx = this.targetDot.x; fy = this.targetDot.y; }
+      else { const a = bodyAngle + (Math.PI / 2) * this.side; fx = this.x + Math.cos(a) * this.maxL; fy = this.y + Math.sin(a) * this.maxL; }
+      this.smoothTarget.x += (fx - this.smoothTarget.x) * 0.3;
+      this.smoothTarget.y += (fy - this.smoothTarget.y) * 0.3;
+      const dist = getDist(this.x, this.y, this.smoothTarget.x, this.smoothTarget.y);
+      const segL = dist / this.n;
+      this.segments[this.n - 1].update(this.smoothTarget, segL);
+      for (let i = this.n - 2; i >= 0; i--) this.segments[i].update(this.segments[i + 1].pos, segL);
+      this.segments[0].fallback({ x: this.x, y: this.y });
+      for (let i = 1; i < this.n; i++) this.segments[i].fallback(this.segments[i - 1].nextPos);
+      this.liftT = (Math.sin(globalTime * 0.06 + this.index * 0.35 + this.phase) + 1) / 2;
+      const elapsed = globalTimeMs - this.colorStartTime;
+      if (elapsed >= 0) {
+        const t = clamp(elapsed / this.colorDuration, 0, 1);
+        const ease = 1 - Math.pow(1 - t, 3);
+        const k = clamp(ease * (+liveConfig.TENTACLE_COLOR_SPEED || 0.045) * 4, 0, 0.5);
+        this.color.h += (this.colorTarget.h - this.color.h) * k;
+        this.color.s += (this.colorTarget.s - this.color.s) * k;
+        this.color.l += (this.colorTarget.l - this.color.l) * k;
+      }
+    }
+    findNearestDot(bodyAngle) {
+      let closest = null, minDist = this.maxL;
+      const gx = Math.floor(this.x / CELL), gy = Math.floor(this.y / CELL);
+      for (let ix = -2; ix <= 2; ix++) {
+        for (let iy = -2; iy <= 2; iy++) {
+          const arr = grid.get(cellKey(gx + ix, gy + iy));
+          if (!arr) continue;
+          for (let d of arr) {
+            if (d.usedBy) continue;
+            const a = Math.atan2(d.y - this.y, d.x - this.x);
+            let diff = a - bodyAngle;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            while (diff >  Math.PI) diff -= Math.PI * 2;
+            if ((this.side === -1 && diff < 0) || (this.side === 1 && diff > 0)) {
+              const dist = getDist(this.x, this.y, d.x, d.y);
+              if (dist < minDist) { minDist = dist; closest = d; }
+            }
+          }
+        }
+      }
+      if (closest) closest.usedBy = this;
+      return closest;
+    }
+    draw() {
+      const lift = this.liftT;
+      const light = clamp(this.color.l - 10, 12, 60) + lift * 10;
+      const sat   = this.color.s + lift * 8;
+      c.beginPath();
+      c.moveTo(this.x, this.y);
+      for (let i = 0; i < this.n; i++) c.lineTo(this.segments[i].nextPos.x, this.segments[i].nextPos.y);
+      c.strokeStyle = `hsla(${this.color.h}, ${sat}%, ${light}%, ${0.7 + lift * 0.25})`;
+      c.lineWidth = 1.0 + this.rand * 2.0 + lift * 0.6;
+      c.stroke();
+      if (lift < 0.3) {
+        const tip = this.segments[this.n - 1].nextPos;
+        const hue = (this.color.h + 30) % 360;
+        c.beginPath(); c.arc(tip.x, tip.y, 1.5, 0, Math.PI * 2);
+        c.fillStyle = `hsla(${hue}, ${this.color.s + 15}%, 75%, 0.8)`;
+        c.fill();
+      }
+    }
+  }
+
+  // ── SPINE / LEGS ─────────────────────────────────────────────
+  let spine = [];
+  let leftLegs = [];
+  let rightLegs = [];
+
+  function buildBody() {
+    const tentCount = Math.max(8, Math.min(80, +liveConfig.MAX_TENTACLES | 0));
+    const spineCount = tentCount + 6;
+
+    spine = Array.from({ length: spineCount }, () => ({ x: w / 2, y: h / 2 }));
+    leftLegs  = Array.from({ length: tentCount }, (_, i) => new Tent(0, 0, 115, 16, -1, i));
+    rightLegs = Array.from({ length: tentCount }, (_, i) => new Tent(0, 0, 115, 16,  1, i));
+
+    const cx = w / 2, cy = h / 2;
+    target.x = cx; target.y = cy; prevHead.x = cx; prevHead.y = cy;
+  }
+
+  function initSpine() {
+    const cx = w / 2, cy = h / 2;
+    target.x = cx; target.y = cy; prevHead.x = cx; prevHead.y = cy;
+    for (let s of spine) { s.x = cx; s.y = cy; }
+  }
+
+  resize(); 
+  buildBody();
+  initSpine();
+
+  let resizeTimer;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { resize(); initSpine(); }, 150);
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (bgTimer) { clearInterval(bgTimer); bgTimer = null; } }
+    else startBgRotation();
+  });
+
+  detectTotalImages(count => {
+    totalImages = count;
+    startBgRotation();
+    changeBackground();
+  });
+
+  // ── UPDATE ───────────────────────────────────────────────────
+  function update() {
+    globalTime++;
+    breathe += 0.022;
+    if (isNaN(snakeColor.h))  snakeColor  = { ...DEFAULT_COLOR };
+    if (isNaN(targetColor.h)) targetColor = { ...DEFAULT_COLOR };
+    const bodySpeed = +liveConfig.BODY_COLOR_SPEED || 0.025;
+    snakeColor.h += (targetColor.h - snakeColor.h) * bodySpeed;
+    snakeColor.s += (targetColor.s - snakeColor.s) * bodySpeed;
+    snakeColor.l += (targetColor.l - snakeColor.l) * bodySpeed;
+    blinkT++;
+    if (blinkT >= nextBlink) {
+      if (!blinkClosing) {
+        blinkAmt += 0.18;
+        if (blinkAmt >= 1) { blinkAmt = 1; blinkClosing = true; }
+      } else {
+        blinkAmt -= 0.18;
+        if (blinkAmt <= 0) { blinkAmt = 0; blinkClosing = false; blinkT = 0; nextBlink = 150 + Math.random() * 250; }
+      }
+    }
+    tongueFlicker = (tongueFlicker + 1) % 80;
+
+    const isIdle = !mouse.active || (globalTimeMs - mouseLastMove > (+liveConfig.MOUSE_IDLE_MS || 1500));
+    if (!isIdle) {
+      const mx = clamp(mouse.x, +liveConfig.MOUSE_MARGIN || 60, w - (+liveConfig.MOUSE_MARGIN || 60));
+      const my = clamp(mouse.y, +liveConfig.MOUSE_MARGIN || 60, h - (+liveConfig.MOUSE_MARGIN || 60));
+      target.x += (mx - target.x) * (+liveConfig.MOUSE_FOLLOW_SPEED || 0.1);
+      target.y += (my - target.y) * (+liveConfig.MOUSE_FOLLOW_SPEED || 0.1);
+    } else {
+      // DVD Bouncing + Random Path Wandering Logic
+      target.x += dvdVel.x;
+      target.y += dvdVel.y;
+
+      const margin = +liveConfig.MOUSE_MARGIN || 60;
+      const minX = margin;
+      const maxX = Math.max(margin + 10, w - margin);
+      const minY = margin;
+      const maxY = Math.max(margin + 10, h - margin);
+
+      let bounced = false;
+
+      // Bounce off Left / Right screen boundaries
+      if (target.x <= minX) {
+        target.x = minX;
+        dvdVel.x = Math.abs(dvdVel.x);
+        bounced = true;
+      } else if (target.x >= maxX) {
+        target.x = maxX;
+        dvdVel.x = -Math.abs(dvdVel.x);
+        bounced = true;
+      }
+
+      // Bounce off Top / Bottom screen boundaries
+      if (target.y <= minY) {
+        target.y = minY;
+        dvdVel.y = Math.abs(dvdVel.y);
+        bounced = true;
+      } else if (target.y >= maxY) {
+        target.y = maxY;
+        dvdVel.y = -Math.abs(dvdVel.y);
+        bounced = true;
+      }
+
+      // Randomly change path direction while wandering on screen
+      if (!bounced && Math.random() < 0.008) {
+        let angle = Math.atan2(dvdVel.y, dvdVel.x);
+        const speedMag = Math.hypot(dvdVel.x, dvdVel.y) || 2.5;
+        angle += (Math.random() - 0.5) * (Math.PI * 0.7); // Shift trajectory randomly
+        dvdVel.x = Math.cos(angle) * speedMag;
+        dvdVel.y = Math.sin(angle) * speedMag;
+      }
+    }
+
+    const rawSpeed = getDist(spine[0].x, spine[0].y, prevHead.x, prevHead.y);
+    speed += (rawSpeed - speed) * 0.08;
+    prevHead.x = spine[0].x; prevHead.y = spine[0].y;
+    spine[0].x = target.x; spine[0].y = target.y;
+    for (let i = 1; i < spine.length; i++) {
+      const dx = spine[i].x - spine[i - 1].x;
+      const dy = spine[i].y - spine[i - 1].y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 0.001;
+      spine[i].x = spine[i - 1].x + (dx / d) * (+liveConfig.SPINE_SEG_DIST || 14);
+      spine[i].y = spine[i - 1].y + (dy / d) * (+liveConfig.SPINE_SEG_DIST || 14);
+    }
+    for (let i = 0; i < leftLegs.length; i++) {
+      const curr = spine[i + 2], prev = spine[i + 1];
+      const angle = Math.atan2(curr.y - prev.y, curr.x - prev.x);
+      leftLegs[i].move(curr.x, curr.y, angle);
+      rightLegs[i].move(curr.x, curr.y, angle);
+    }
+    const px0 = spine[0].x, py0 = spine[0].y;
+    for (let dot of dots) {
+      let nearest = Infinity;
+      for (let s = 0; s < spine.length; s += 3) {
+        const dd = getDist(dot.x, dot.y, spine[s].x, spine[s].y);
+        if (dd < nearest) nearest = dd;
+      }
+      const push = 18;
+      if (nearest < push) {
+        const dx = dot.x - px0, dy = dot.y - py0;
+        const d = Math.sqrt(dx * dx + dy * dy) || 1;
+        const force = (1 - nearest / push) * 1.6;
+        dot.ox += (dx / d) * force;
+        dot.oy += (dy / d) * force;
+      }
+      dot.ox *= 0.88;
+      dot.oy *= 0.88;
+    }
+  }
+
+  // ── DRAW HELPERS ─────────────────────────────────────────────
+  function bodyRadius(i, frac) {
+    const bf = Math.max(0, 1 - speed * 0.6);
+    let base = Math.sin(frac * Math.PI * 0.88) * 13 + 2;
+    base += Math.sin(breathe + i * 0.15) * 0.9 * bf;
+    if (i < 3) base = 9;
+    if (i === 0) base = 0;
+    return base;
+  }
+  function drawShadows() {
+    const n = spine.length;
+    c.save();
+    for (let i = n - 1; i >= 1; i--) {
+      const frac = 1 - i / n;
+      const r = bodyRadius(i, frac);
+      if (r < 2) continue;
+      c.beginPath();
+      c.ellipse(spine[i].x + 5, spine[i].y + 7, r * 1.3, r * 0.55, 0, 0, Math.PI * 2);
+      c.fillStyle = 'rgba(0,0,0,0.22)';
+      c.fill();
+    }
+    c.restore();
+  }
+
+  // Smooth continuous peristalsis swallowing wave
+  function getSpinePulse(i, totalNodes) {
+    const totalWaveMs = +liveConfig.TENTACLE_WAVE_DURATION || 3000;
+    const elapsed = globalTimeMs - waveStartTime;
+    if (elapsed < 0 || elapsed > totalWaveMs) return 0;
+
+    const progress = elapsed / totalWaveMs; // 0.0 to 1.0
+    const bulgeWidth = 4.5; // Width of the swallowing lump in circles
+    
+    // Smooth movement of lump center from head to tail
+    const centerPos = -bulgeWidth + progress * (totalNodes + 2 * bulgeWidth);
+    const dist = Math.abs(i - centerPos);
+
+    if (dist < bulgeWidth) {
+      // Cosine bell curve creates a completely smooth lump shape
+      return 0.5 * (1 + Math.cos((dist / bulgeWidth) * Math.PI));
+    }
+    return 0;
+  }
+
+  function drawScaledBody() {
+    const n = spine.length;
+
+    // First layer: base body circles expanding continuously
+    for (let i = n - 1; i >= 0; i--) {
+      const frac = 1 - i / n;
+      let r = bodyRadius(i, frac);
+      const pulse = getSpinePulse(i, n);
+
+      // Smooth lump bulge expansion (up to 75% wider peak)
+      r *= (1 + pulse * 0.75);
+
+      if (r < 0.2) continue;
+
+      c.beginPath();
+      c.arc(spine[i].x, spine[i].y, r, 0, Math.PI * 2);
+
+      // Smooth color glow pulse along the lump
+      const s = clamp(snakeColor.s + pulse * 35, 0, 100);
+      const l = clamp(snakeColor.l + 18 + pulse * 30, 0, 100);
+
+      c.fillStyle = `hsl(${snakeColor.h + 8}, ${s}%, ${l}%)`;
+      c.fill();
+    }
+
+    // Second layer: scales and pattern overlays on circles
+    for (let i = n - 1; i >= 1; i--) {
+      const frac = 1 - i / n;
+      let r = bodyRadius(i, frac);
+      const pulse = getSpinePulse(i, n);
+
+      r *= (1 + pulse * 0.75);
+      if (r < 1) continue;
+
+      const ang = Math.atan2(spine[i - 1].y - spine[i].y, spine[i - 1].x - spine[i].x);
+      const ds = ang - Math.PI * 0.52, de = ang + Math.PI * 0.52;
+      const isDark = (Math.floor(i / 4) % 2) === 0;
+
+      c.beginPath();
+      c.moveTo(spine[i].x, spine[i].y);
+      c.arc(spine[i].x, spine[i].y, r, ds, de);
+      c.closePath();
+
+      const baseL = isDark
+        ? Math.max(8, snakeColor.l - 15)
+        : snakeColor.l - 5;
+
+      c.fillStyle = isDark
+        ? `hsl(${snakeColor.h}, ${snakeColor.s + 10}%, ${baseL + pulse * 20}%)`
+        : `hsl(${snakeColor.h + 2}, ${snakeColor.s}%, ${baseL + pulse * 25}%)`;
+      c.fill();
+
+      const latW = Math.PI * 0.18;
+      for (let side of [-1, 1]) {
+        const s1 = ang + side * (Math.PI * 0.5 - latW);
+        const s2 = ang + side * (Math.PI * 0.5 + latW);
+        c.beginPath();
+        c.moveTo(spine[i].x, spine[i].y);
+        c.arc(spine[i].x, spine[i].y, r, Math.min(s1, s2), Math.max(s1, s2));
+        c.closePath();
+        c.fillStyle = `hsl(${snakeColor.h + 5}, ${snakeColor.s - 5}%, ${snakeColor.l + 5 + pulse * 18}%)`;
+        c.fill();
+      }
+
+      if (i % 2 === 0 && r > 4) {
+        c.beginPath();
+        c.arc(spine[i].x, spine[i].y, r * 0.95, ang - Math.PI * 0.85, ang + Math.PI * 0.85);
+        c.strokeStyle = 'rgba(0,0,0,0.18)';
+        c.lineWidth = 0.7;
+        c.stroke();
+      }
+    }
+  }
+
+  function drawRattle() {
+    const rattleCount = Math.max(3, Math.min(20, +liveConfig.RATTLE_COUNT | 0));
+    const tail = spine[spine.length - 1], prev = spine[spine.length - 2];
+    const ang = Math.atan2(tail.y - prev.y, tail.x - prev.x);
+    const shakeAmp = Math.min(speed * 0.6, 0.35);
+    const shake = Math.sin(globalTime * 0.45) * shakeAmp;
+    c.save();
+    c.translate(tail.x, tail.y);
+    c.rotate(ang + shake);
+    let rx = 0;
+    for (let seg = 0; seg < rattleCount; seg++) {
+      const segW = 5.5 - seg * 0.55, segH = 4.5 - seg * 0.4;
+      const isLight = seg % 2 === 0;
+      c.beginPath();
+      c.ellipse(rx + segW * 0.5, 0, segW, segH, 0, 0, Math.PI * 2);
+      c.fillStyle = isLight
+        ? `hsl(${snakeColor.h}, ${snakeColor.s}%, ${snakeColor.l}%)`
+        : `hsl(${snakeColor.h}, ${snakeColor.s}%, ${Math.max(10, snakeColor.l - 12)}%)`;
+      c.fill();
+      c.strokeStyle = 'rgba(0,0,0,0.35)';
+      c.lineWidth = 0.6;
+      c.stroke();
+      rx += segW * 1.5;
+    }
+    c.restore();
+  }
+
+  function drawHead() {
+    const hx = spine[0].x, hy = spine[0].y;
+    const ang = Math.atan2(spine[0].y - spine[1].y, spine[0].x - spine[1].x);
+    c.save();
+    c.translate(hx, hy);
+    c.rotate(ang);
+    c.beginPath();
+    c.ellipse(0, 0, 9, 9, 0, 0, Math.PI * 2);
+    c.fillStyle = `hsl(${snakeColor.h}, ${snakeColor.s}%, ${snakeColor.l - 5}%)`;
+    c.fill();
+    c.beginPath();
+    c.moveTo(18, 0);
+    c.bezierCurveTo(14, -7, 2, -14, -8, -12);
+    c.bezierCurveTo(-14, -11, -16, -5, -14, 0);
+    c.bezierCurveTo(-16, 5, -14, 11, -8, 12);
+    c.bezierCurveTo(2, 14, 14, 7, 18, 0);
+    c.closePath();
+    c.fillStyle = `hsl(${snakeColor.h}, ${snakeColor.s + 5}%, ${Math.max(10, snakeColor.l - 12)}%)`;
+    c.fill();
+    for (let s of [-1, 1]) {
+      const ex = 3, ey = s * 8.5;
+      const mx = mouse.active ? mouse.x : hx + Math.cos(ang) * 100;
+      const my = mouse.active ? mouse.y : hy;
+      const dx = mx - hx, dy = my - hy;
+      const cosA = Math.cos(-ang), sinA = Math.sin(-ang);
+      const lx =  dx * cosA - dy * sinA;
+      const ly =  dx * sinA + dy * cosA;
+      const len = Math.hypot(lx, ly);
+      const px = len > 0.001 ? (lx / len) * 1.2 : 0;
+      const py = len > 0.001 ? (ly / len) * 1.2 : 0;
+      c.beginPath(); c.arc(ex, ey, 3.5, 0, Math.PI * 2);
+      c.fillStyle = `hsl(${(snakeColor.h + 30) % 360}, 90%, 50%)`;
+      c.fill();
+      c.beginPath();
+      c.ellipse(ex + px, ey + py, 1.1, 3.1, 0, 0, Math.PI * 2);
+      c.fillStyle = '#080500';
+      c.fill();
+      if (blinkAmt > 0) {
+        c.beginPath();
+        c.ellipse(ex, ey, 4.2, 4.2 * blinkAmt, 0, 0, Math.PI * 2);
+        c.fillStyle = `hsl(${snakeColor.h}, ${snakeColor.s}%, ${snakeColor.l - 10}%)`;
+        c.fill();
+      }
+    }
+    if (tongueFlicker < 30) {
+      const tExt = tongueFlicker < 15 ? tongueFlicker / 15 : 1 - (tongueFlicker - 15) / 15;
+      const tLen = 16 * tExt, forkLen = 7 * tExt, forkAng = 0.38;
+      c.beginPath();
+      c.moveTo(18, 0); c.lineTo(18 + tLen, 0);
+      c.strokeStyle = '#c0121a'; c.lineWidth = 1.5; c.stroke();
+      if (tLen > 4) {
+        c.beginPath();
+        c.moveTo(18 + tLen, 0);
+        c.lineTo(18 + tLen + Math.cos(forkAng) * forkLen,  Math.sin(forkAng) * forkLen);
+        c.moveTo(18 + tLen, 0);
+        c.lineTo(18 + tLen + Math.cos(-forkAng) * forkLen, Math.sin(-forkAng) * forkLen);
+        c.stroke();
+      }
+    }
+    c.restore();
+  }
+
+  function draw() {
+    c.clearRect(0, 0, w, h);
+    const idleHue = (snakeColor.h + 20) % 360;
+    const grabHue = (snakeColor.h + 35) % 360;
+    for (let d of dots) {
+      const dx = d.x + d.ox, dy = d.y + d.oy;
+      c.beginPath();
+      c.arc(dx, dy, d.size, 0, Math.PI * 2);
+      c.fillStyle = d.usedBy
+        ? `hsla(${grabHue}, 85%, 75%, 0.95)`
+        : `hsla(${idleHue}, ${Math.max(15, snakeColor.s - 10)}%, ${Math.min(65, snakeColor.l + 15)}%, 0.45)`;
+      c.fill();
+    }
+    drawShadows();
+    for (let i = 0; i < leftLegs.length; i++) { leftLegs[i].draw(); rightLegs[i].draw(); }
+    drawRattle();
+    drawScaledBody();
+    drawHead();
+  }
+
+  function loop(now) {
+    globalTimeMs = now || performance.now();
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // ──────────────────────────────────────────────────────────────
+  // LIVELY PROPERTY INJECTION — Official Lively API Handler
+  // ──────────────────────────────────────────────────────────────
+  
+  function applyConfigChanges(changed) {
+    Object.assign(liveConfig, changed);
+    
+    // Restart timer if interval changed
+    if ('CHANGE_INTERVAL_MS' in changed) {
+      startBgRotation();
+    }
+    
+    // If BG_FOLDER changed, redetect images
+    if ('BG_FOLDER' in changed) {
+      detectTotalImages(count => {
+        totalImages = count;
+        currentImgNum = 1;
+        changeBackground();
+      });
+    }
+    
+    // If structural properties changed, rebuild body
+    if ('MAX_TENTACLES' in changed || 'SPINE_SEG_DIST' in changed) {
+      buildBody();
+      initSpine();
+    }
+  }
+
+  function applySingleConfig(name, val) {
+    const changed = {};
+    let value = val;
+    if (typeof val === 'object' && val !== null && 'value' in val) {
+      value = val.value;
+    }
+    const num = parseFloat(value);
+    changed[name] = isNaN(num) ? value : num;
+
+    applyConfigChanges(changed);
+  }
+
+  window.livelyPropertyListener = function(name, val) {
+    applySingleConfig(name, val);
+  };
+
+  function readInitialConfig() {
+    const cfg = {};
+    const searchParams = new URLSearchParams(window.location.search);
+    for (const [k, v] of searchParams) {
+      const num = parseFloat(v);
+      cfg[k] = isNaN(num) ? v : num;
+    }
+    return cfg;
+  }
+
+  applyConfigChanges(readInitialConfig());
+
+  // ── DAT.GUI (browser preview) ────────────────────────────────
+  if (!navigator.userAgent.includes('LivelyWallpaper') && typeof dat !== 'undefined') {
+    try {
+      const gui = new dat.GUI({ width: 320 });
+      gui.close();
+      const f1 = gui.addFolder('Background');
+      f1.add(liveConfig, 'CHANGE_INTERVAL_MS', 1000, 60000, 500).name('Interval (ms)').onFinishChange(v => applyConfigChanges({ CHANGE_INTERVAL_MS: v }));
+      f1.add(liveConfig, 'FADE_MS', 200, 10000, 100).name('Fade (ms)').onFinishChange(v => applyConfigChanges({ FADE_MS: v }));
+      f1.add(liveConfig, 'SHUFFLE_BACKGROUNDS', 0, 1, 1).name('Shuffle');
+      const f2 = gui.addFolder('Snake');
+      f2.add(liveConfig, 'MAX_TENTACLES', 8, 80, 1).name('Tentacles').onFinishChange(v => applyConfigChanges({ MAX_TENTACLES: v }));
+      f2.add(liveConfig, 'SPINE_SEG_DIST', 6, 30, 1).name('Spine');
+      f2.add(liveConfig, 'RATTLE_COUNT', 3, 20, 1).name('Rattle');
+      const f3 = gui.addFolder('Color Wave');
+      f3.add(liveConfig, 'TENTACLE_COLOR_SPEED', 0.005, 0.3, 0.005).name('Speed');
+      f3.add(liveConfig, 'TENTACLE_WAVE_DURATION', 200, 10000, 100).name('Wave (ms)');
+      f3.add(liveConfig, 'BODY_COLOR_SPEED', 0.001, 0.2, 0.005).name('Body');
+      const f4 = gui.addFolder('Mouse');
+      f4.add(liveConfig, 'MOUSE_FOLLOW_SPEED', 0.01, 0.5, 0.01).name('Follow');
+      f4.add(liveConfig, 'MOUSE_MARGIN', 0, 300, 10).name('Margin');
+      f4.add(liveConfig, 'MOUSE_IDLE_MS', 0, 10000, 100).name('Idle (ms)');
+    } catch (e) {}
+  }
+})();
+</script>
+</body>
+</html>
